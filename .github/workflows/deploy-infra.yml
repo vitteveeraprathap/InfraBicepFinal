@@ -15,8 +15,8 @@ on:
           - container
         default: all
       environment:
-        description: 'Environment (dev/uat/prod)'
-        required: true
+        description: 'Environment (dev/uat/prod) - fallback only'
+        required: false
         type: choice
         options:
           - dev
@@ -32,16 +32,35 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    # 👇 This line enforces environment-based approvals
-    environment: ${{ github.event.inputs.environment }}
+    # Map branch/ref -> environment (feature/* -> dev, develop -> uat, master -> prod).
+    # If none of those match, fall back to the workflow_dispatch input.
+    environment: ${{ 
+      startsWith(github.ref, 'refs/heads/feature/') && 'dev' ||
+      github.ref == 'refs/heads/develop' && 'uat' ||
+      github.ref == 'refs/heads/master' && 'prod' ||
+      github.event.inputs.environment
+    }}
 
     env:
       BICEP_MAIN: infra/main.bicep
-      PARAMS_FILE: infra/parameters/${{ github.event.inputs.environment }}.parameters.json
+      # Use same mapping for params file path
+      PARAMS_FILE: infra/parameters/${
+        {{
+          startsWith(github.ref, 'refs/heads/feature/') && 'dev' ||
+          github.ref == 'refs/heads/develop' && 'uat' ||
+          github.ref == 'refs/heads/master' && 'prod' ||
+          github.event.inputs.environment
+        }}
+      }.parameters.json
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      - name: Show chosen ref & environment
+        run: |
+          echo "github.ref = $GITHUB_REF"
+          echo "Computed ENV = ${{ job.environment.name }}"
 
       - name: Azure login
         uses: azure/login@v2
@@ -96,13 +115,22 @@ jobs:
 
       - name: What-if (preview changes)
         run: |
+          CHOSEN_ENV=$(
+            echo "${{ github.ref }}" | awk '
+              /refs\/heads\/feature\// { print "dev"; exit }
+              /refs\/heads\/develop$/ { print "uat"; exit }
+              /refs\/heads\/master$/ { print "prod"; exit }
+              { print "'"${{ github.event.inputs.environment }}"'" }
+            '
+          )
+          echo "Using params for env: $CHOSEN_ENV"
           LOCATION="${{ github.event.inputs.location }}"
           if [ -z "$LOCATION" ]; then LOCATION="southeastasia"; fi
 
           az deployment sub what-if \
             --location "$LOCATION" \
             --template-file "${{ env.BICEP_MAIN }}" \
-            --parameters @"${{ env.PARAMS_FILE }}" \
+            --parameters @"infra/parameters/${CHOSEN_ENV}.parameters.json" \
             deployStorage=${{ steps.flags.outputs.deployStorage }} \
             deployKeyVault=${{ steps.flags.outputs.deployKeyVault }} \
             deployContainer=${{ steps.flags.outputs.deployContainer }} \
@@ -110,6 +138,15 @@ jobs:
 
       - name: Deploy (subscription-level)
         run: |
+          CHOSEN_ENV=$(
+            echo "${{ github.ref }}" | awk '
+              /refs\/heads\/feature\// { print "dev"; exit }
+              /refs\/heads\/develop$/ { print "uat"; exit }
+              /refs\/heads\/master$/ { print "prod"; exit }
+              { print "'"${{ github.event.inputs.environment }}"'" }
+            '
+          )
+          echo "Using params for env: $CHOSEN_ENV"
           LOCATION="${{ github.event.inputs.location }}"
           if [ -z "$LOCATION" ]; then LOCATION="southeastasia"; fi
           DEPLOY_NAME="sub-deploy-${{ github.run_id }}"
@@ -118,7 +155,7 @@ jobs:
             --name "$DEPLOY_NAME" \
             --location "$LOCATION" \
             --template-file "${{ env.BICEP_MAIN }}" \
-            --parameters @"${{ env.PARAMS_FILE }}" \
+            --parameters @"infra/parameters/${CHOSEN_ENV}.parameters.json" \
             deployStorage=${{ steps.flags.outputs.deployStorage }} \
             deployKeyVault=${{ steps.flags.outputs.deployKeyVault }} \
             deployContainer=${{ steps.flags.outputs.deployContainer }} \
