@@ -31,6 +31,10 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
+    # 👇 This line enforces environment-based approvals
+    environment: ${{ github.event.inputs.environment }}
+
     env:
       BICEP_MAIN: infra/main.bicep
       PARAMS_FILE: infra/parameters/${{ github.event.inputs.environment }}.parameters.json
