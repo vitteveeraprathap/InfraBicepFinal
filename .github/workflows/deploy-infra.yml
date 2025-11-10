@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
 
     # Map branch/ref -> environment (feature/* -> dev, develop -> uat, master -> prod).
-    # If none of those match, fall back to the workflow_dispatch input.
+    # If none match, fall back to the workflow_dispatch input.
     environment: ${{ 
       startsWith(github.ref, 'refs/heads/feature/') && 'dev' ||
       github.ref == 'refs/heads/develop' && 'uat' ||
@@ -43,24 +43,37 @@ jobs:
 
     env:
       BICEP_MAIN: infra/main.bicep
-      # Use same mapping for params file path
-      PARAMS_FILE: infra/parameters/${
-        {{
-          startsWith(github.ref, 'refs/heads/feature/') && 'dev' ||
-          github.ref == 'refs/heads/develop' && 'uat' ||
-          github.ref == 'refs/heads/master' && 'prod' ||
-          github.event.inputs.environment
-        }}
-      }.parameters.json
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Compute chosen environment (based on branch/ref or input)
+        id: choose-env
+        run: |
+          # Determine environment from GITHUB_REF first; if not matched, use input fallback
+          REF="${GITHUB_REF:-${{ github.ref }}}"
+          FALLBACK="${{ github.event.inputs.environment }}"
+          if echo "$REF" | grep -qE '^refs/heads/feature/'; then
+            echo "env=dev" >> "$GITHUB_OUTPUT"
+          elif [ "$REF" = "refs/heads/develop" ]; then
+            echo "env=uat" >> "$GITHUB_OUTPUT"
+          elif [ "$REF" = "refs/heads/master" ]; then
+            echo "env=prod" >> "$GITHUB_OUTPUT"
+          else
+            # use the workflow_dispatch input (may be empty if not provided)
+            if [ -z "$FALLBACK" ]; then
+              echo "env=dev" >> "$GITHUB_OUTPUT"
+            else
+              echo "env=$FALLBACK" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+          echo "Chosen environment: ${{ steps.choose-env.outputs.env }}" || true
+
       - name: Show chosen ref & environment
         run: |
-          echo "github.ref = $GITHUB_REF"
-          echo "Computed ENV = ${{ job.environment.name }}"
+          echo "github.ref = ${GITHUB_REF}"
+          echo "Computed ENV = ${{ steps.choose-env.outputs.env }}"
 
       - name: Azure login
         uses: azure/login@v2
@@ -115,18 +128,11 @@ jobs:
 
       - name: What-if (preview changes)
         run: |
-          CHOSEN_ENV=$(
-            echo "${{ github.ref }}" | awk '
-              /refs\/heads\/feature\// { print "dev"; exit }
-              /refs\/heads\/develop$/ { print "uat"; exit }
-              /refs\/heads\/master$/ { print "prod"; exit }
-              { print "'"${{ github.event.inputs.environment }}"'" }
-            '
-          )
-          echo "Using params for env: $CHOSEN_ENV"
+          CHOSEN_ENV="${{ steps.choose-env.outputs.env }}"
           LOCATION="${{ github.event.inputs.location }}"
           if [ -z "$LOCATION" ]; then LOCATION="southeastasia"; fi
 
+          echo "Running what-if for env: $CHOSEN_ENV, location: $LOCATION"
           az deployment sub what-if \
             --location "$LOCATION" \
             --template-file "${{ env.BICEP_MAIN }}" \
@@ -138,19 +144,12 @@ jobs:
 
       - name: Deploy (subscription-level)
         run: |
-          CHOSEN_ENV=$(
-            echo "${{ github.ref }}" | awk '
-              /refs\/heads\/feature\// { print "dev"; exit }
-              /refs\/heads\/develop$/ { print "uat"; exit }
-              /refs\/heads\/master$/ { print "prod"; exit }
-              { print "'"${{ github.event.inputs.environment }}"'" }
-            '
-          )
-          echo "Using params for env: $CHOSEN_ENV"
+          CHOSEN_ENV="${{ steps.choose-env.outputs.env }}"
           LOCATION="${{ github.event.inputs.location }}"
           if [ -z "$LOCATION" ]; then LOCATION="southeastasia"; fi
           DEPLOY_NAME="sub-deploy-${{ github.run_id }}"
 
+          echo "Deploying env: $CHOSEN_ENV to location: $LOCATION (deploy name: $DEPLOY_NAME)"
           az deployment sub create \
             --name "$DEPLOY_NAME" \
             --location "$LOCATION" \
